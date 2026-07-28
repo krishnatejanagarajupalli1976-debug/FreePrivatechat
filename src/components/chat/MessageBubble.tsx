@@ -20,11 +20,13 @@ export function MessageBubble({ message }: MessageBubbleProps) {
     );
   }
 
-  // Parse file content (format: "url|filename")
+  // Parse file content — supports video: prefix for videos sent as 'file' type
   const parseFileContent = (content: string) => {
-    const parts = content.split('|');
+    const isVideo = content.startsWith('video:');
+    const raw = isVideo ? content.slice(6) : content;
+    const parts = raw.split('|');
     if (parts.length >= 2) {
-      return { url: parts[0], filename: parts.slice(1).join('|') };
+      return { url: parts[0], filename: parts.slice(1).join('|'), isVideo };
     }
     return null;
   };
@@ -48,6 +50,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
 
   const isMediaMessage = message.messageType === 'image' || message.messageType === 'file' || message.messageType === 'video';
   const fileData = isMediaMessage ? parseFileContent(message.content) : null;
+  const isVideoMessage = message.messageType === 'video' || (message.messageType === 'file' && fileData?.isVideo);
 
   return (
     <div
@@ -55,20 +58,19 @@ export function MessageBubble({ message }: MessageBubbleProps) {
         message.isOwn ? 'items-end' : 'items-start'
       }`}
     >
-      {/* Sender name for received messages */}
       {!message.isOwn && (
         <span className="text-xs text-primary font-medium px-3 mb-0.5">
           {message.senderName}
         </span>
       )}
-      
+
       <div
         className={`chat-bubble ${
           message.isOwn ? 'chat-bubble-sent' : 'chat-bubble-received'
         } ${isMediaMessage ? 'p-2' : ''}`}
       >
         {/* Video message */}
-        {message.messageType === 'video' && fileData ? (
+        {isVideoMessage && fileData ? (
           <div className="space-y-2 min-w-[240px]">
             <div className="relative">
               <video
@@ -92,6 +94,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
               </Button>
             </div>
           </div>
+
         ) : message.messageType === 'image' && fileData ? (
           <div className="space-y-2 min-w-[200px]">
             <div className="relative">
@@ -117,7 +120,8 @@ export function MessageBubble({ message }: MessageBubbleProps) {
               </Button>
             </div>
           </div>
-        ) : message.messageType === 'file' && fileData ? (
+
+        ) : message.messageType === 'file' && fileData && !fileData.isVideo ? (
           <div className="flex items-center gap-3 min-w-[220px] p-1">
             <div className="w-11 h-11 bg-primary/15 rounded-xl flex items-center justify-center shrink-0">
               <FileIcon className="w-6 h-6 text-primary" />
@@ -135,11 +139,11 @@ export function MessageBubble({ message }: MessageBubbleProps) {
               Download
             </Button>
           </div>
+
         ) : (
-          /* Text message */
           <p className="text-[15px] leading-relaxed">{message.content}</p>
         )}
-        
+
         <div
           className={`flex justify-end mt-1 -mb-0.5 ${
             message.isOwn ? 'text-bubble-sent-foreground/70' : 'text-muted-foreground'

@@ -28,8 +28,9 @@ export function MessageInput({ onSendMessage, onUploadFile, disabled }: MessageI
         const fileUrl = await onUploadFile(preview.file);
         if (fileUrl) {
           const isVideo = preview.file.type.startsWith('video/');
-          const msgType = isVideo ? 'video' : preview.type;
-          onSendMessage(`${fileUrl}|${preview.name}`, msgType);
+          // prefix content with 'video:' so receiver can detect it; send as 'file' type to satisfy DB constraint
+          const content = isVideo ? `video:${fileUrl}|${preview.name}` : `${fileUrl}|${preview.name}`;
+          onSendMessage(content, 'file');
         }
       } finally {
         setIsUploading(false);
@@ -56,12 +57,8 @@ export function MessageInput({ onSendMessage, onUploadFile, disabled }: MessageI
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>, type: 'file' | 'image' | 'video') => {
     const file = e.target.files?.[0];
     if (file) {
-      if (type === 'image' || type === 'video') {
-        const url = URL.createObjectURL(file);
-        setPreview({ type: type === 'video' ? 'file' : 'image', name: file.name, url, file });
-      } else {
-        setPreview({ type: 'file', name: file.name, file });
-      }
+      const url = URL.createObjectURL(file);
+      setPreview({ type: type === 'image' ? 'image' : 'file', name: file.name, url, file });
     }
     setShowMenu(false);
     // Reset input
@@ -136,6 +133,8 @@ export function MessageInput({ onSendMessage, onUploadFile, disabled }: MessageI
           <div className="bg-card rounded-lg border border-border p-3 flex items-center gap-3">
             {preview.type === 'image' && preview.url ? (
               <img src={preview.url} alt="Preview" className="w-16 h-16 object-cover rounded" />
+            ) : preview.file?.type.startsWith('video/') && preview.url ? (
+              <video src={preview.url} className="w-16 h-16 object-cover rounded" />
             ) : (
               <div className="w-12 h-12 bg-muted rounded flex items-center justify-center">
                 <Paperclip className="w-6 h-6 text-muted-foreground" />
