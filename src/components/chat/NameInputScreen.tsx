@@ -97,7 +97,7 @@ export function NameInputScreen({ onNameSet }: NameInputScreenProps) {
             textShadow: '0 0 8px rgba(0, 0, 0, 0.15), 0 0 20px rgba(0, 0, 0, 0.1)'
           }}
         >
-          Created by: Nagaraju palli Krishna Teja
+          Created by: Nagarajupalli Krishna Teja
         </p>
         <p 
           className="text-xs mt-1"
@@ -106,7 +106,7 @@ export function NameInputScreen({ onNameSet }: NameInputScreenProps) {
             textShadow: '0 0 8px rgba(0, 0, 0, 0.15), 0 0 20px rgba(0, 0, 0, 0.1)'
           }}
         >
-          © 2026 Nagaraju palli Krishna Teja. All rights reserved.
+          © 2026 Nagarajupalli Krishna Teja. All rights reserved.
         </p>
       </footer>
     </div>
