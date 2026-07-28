@@ -1,0 +1,402 @@
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { supabase } from '@/integrations/supabase/client';
+import { getSessionId, getDisplayName, generateRoomCode } from '@/lib/sessionStore';
+import { useToast } from '@/hooks/use-toast';
+
+export interface Message {
+  id: string;
+  content: string;
+  messageType: 'text' | 'system' | 'image' | 'file' | 'voice' | 'video';
+  createdAt: string;
+  participantId: string;
+  senderName: string;
+  isOwn: boolean;
+}
+
+export interface Participant {
+  id: string;
+  displayName: string;
+  isActive: boolean;
+}
+
+export function useChat() {
+  const [roomId, setRoomId] = useState<string | null>(null);
+  const [roomCode, setRoomCode] = useState<string | null>(null);
+  const [participantId, setParticipantId] = useState<string | null>(null);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [participants, setParticipants] = useState<Participant[]>([]);
+  const [isConnected, setIsConnected] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+  const { toast } = useToast();
+
+  const sessionId = getSessionId();
+  const displayName = getDisplayName();
+
+  // Subscribe to realtime messages
+  const subscribeToRoom = useCallback((roomIdToSubscribe: string, myParticipantId: string) => {
+    if (channelRef.current) {
+      channelRef.current.unsubscribe();
+    }
+
+    const channel = supabase
+      .channel(`room-${roomIdToSubscribe}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'messages',
+          filter: `room_id=eq.${roomIdToSubscribe}`,
+        },
+        async (payload) => {
+          const newMessage = payload.new as any;
+          
+          // Fetch participant name
+          const { data: participant } = await supabase
+            .from('room_participants')
+            .select('display_name')
+            .eq('id', newMessage.participant_id)
+            .maybeSingle();
+
+          const message: Message = {
+            id: newMessage.id,
+            content: newMessage.content,
+            messageType: newMessage.message_type,
+            createdAt: newMessage.created_at,
+            participantId: newMessage.participant_id,
+            senderName: participant?.display_name || 'Unknown',
+            isOwn: newMessage.participant_id === myParticipantId,
+          };
+
+          setMessages((prev) => [...prev, message]);
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'room_participants',
+          filter: `room_id=eq.${roomIdToSubscribe}`,
+        },
+        async (payload) => {
+          // Refresh participants
+          const { data } = await supabase
+            .from('room_participants')
+            .select('*')
+            .eq('room_id', roomIdToSubscribe)
+            .eq('is_active', true);
+
+          if (data) {
+            setParticipants(
+              data.map((p) => ({
+                id: p.id,
+                displayName: p.display_name,
+                isActive: p.is_active,
+              }))
+            );
+          }
+
+          // Handle join/leave notifications
+          if (payload.eventType === 'INSERT') {
+            const newParticipant = payload.new as any;
+            if (newParticipant.id !== myParticipantId) {
+              // Add system message for join
+              const joinMessage: Message = {
+                id: crypto.randomUUID(),
+                content: `${newParticipant.display_name} joined the chat`,
+                messageType: 'system',
+                createdAt: new Date().toISOString(),
+                participantId: '',
+                senderName: 'System',
+                isOwn: false,
+              };
+              setMessages((prev) => [...prev, joinMessage]);
+            }
+          } else if (payload.eventType === 'UPDATE') {
+            const updatedParticipant = payload.new as any;
+            const oldParticipant = payload.old as any;
+            if (oldParticipant.is_active && !updatedParticipant.is_active) {
+              // Add system message for leave
+              const leaveMessage: Message = {
+                id: crypto.randomUUID(),
+                content: `${updatedParticipant.display_name} left the chat`,
+                messageType: 'system',
+                createdAt: new Date().toISOString(),
+                participantId: '',
+                senderName: 'System',
+                isOwn: false,
+              };
+              setMessages((prev) => [...prev, leaveMessage]);
+            }
+          }
+        }
+      )
+      .subscribe((status) => {
+        setIsConnected(status === 'SUBSCRIBED');
+      });
+
+    channelRef.current = channel;
+  }, []);
+
+  // Create a new room
+  const createRoom = useCallback(async (maxUsers: number = 10) => {
+    if (!displayName) return null;
+    
+    setIsLoading(true);
+    try {
+      const code = generateRoomCode();
+
+      // Try with requested size; if DB constraint rejects it, fall back to 4
+      let room: any = null;
+      for (const size of [maxUsers, 4]) {
+        const { data, error } = await supabase
+          .from('rooms')
+          .insert({ room_code: code, max_users: size })
+          .select()
+          .single();
+        if (!error) { room = data; break; }
+        if (size === 4) throw error; // both failed
+      }
+
+      const { data: participant, error: participantError } = await supabase
+        .from('room_participants')
+        .insert({
+          room_id: room.id,
+          display_name: displayName,
+          session_id: sessionId,
+        })
+        .select()
+        .single();
+
+      if (participantError) throw participantError;
+
+      setRoomId(room.id);
+      setRoomCode(code);
+      setParticipantId(participant.id);
+      setParticipants([{ id: participant.id, displayName, isActive: true }]);
+      subscribeToRoom(room.id, participant.id);
+
+      return code;
+    } catch (error: any) {
+      toast({
+        title: 'Error creating room',
+        description: error.message,
+        variant: 'destructive',
+      });
+      return null;
+    } finally {
+      setIsLoading(false);
+    }
+  }, [displayName, sessionId, subscribeToRoom, toast]);
+
+  // Join an existing room
+  const joinRoom = useCallback(async (code: string) => {
+    if (!displayName) return false;
+    
+    setIsLoading(true);
+    try {
+      // Find room by code
+      const { data: room, error: roomError } = await supabase
+        .from('rooms')
+        .select('*')
+        .eq('room_code', code.toUpperCase())
+        .maybeSingle();
+
+      if (roomError) throw roomError;
+      if (!room) {
+        toast({
+          title: 'Invalid Room ID',
+          description: 'The room does not exist or has expired.',
+          variant: 'destructive',
+        });
+        return false;
+      }
+
+      // Check participant count
+      const { data: existingParticipants } = await supabase
+        .from('room_participants')
+        .select('*')
+        .eq('room_id', room.id)
+        .eq('is_active', true);
+
+      if (existingParticipants && existingParticipants.length >= room.max_users) {
+        toast({
+          title: 'Room is full',
+          description: 'This room has reached its maximum capacity.',
+          variant: 'destructive',
+        });
+        return false;
+      }
+
+      // Check if already in room
+      const { data: existingParticipant } = await supabase
+        .from('room_participants')
+        .select('*')
+        .eq('room_id', room.id)
+        .eq('session_id', sessionId)
+        .maybeSingle();
+
+      let participant;
+      if (existingParticipant) {
+        // Reactivate existing participant
+        const { data, error } = await supabase
+          .from('room_participants')
+          .update({ is_active: true, display_name: displayName })
+          .eq('id', existingParticipant.id)
+          .select()
+          .single();
+        if (error) throw error;
+        participant = data;
+      } else {
+        // Create new participant
+        const { data, error } = await supabase
+          .from('room_participants')
+          .insert({
+            room_id: room.id,
+            display_name: displayName,
+            session_id: sessionId,
+          })
+          .select()
+          .single();
+        if (error) throw error;
+        participant = data;
+      }
+
+      // Get all active participants
+      const { data: allParticipants } = await supabase
+        .from('room_participants')
+        .select('*')
+        .eq('room_id', room.id)
+        .eq('is_active', true);
+
+      setRoomId(room.id);
+      setRoomCode(code.toUpperCase());
+      setParticipantId(participant.id);
+      setParticipants(
+        (allParticipants || []).map((p) => ({
+          id: p.id,
+          displayName: p.display_name,
+          isActive: p.is_active,
+        }))
+      );
+      subscribeToRoom(room.id, participant.id);
+
+      return true;
+    } catch (error: any) {
+      toast({
+        title: 'Error joining room',
+        description: error.message,
+        variant: 'destructive',
+      });
+      return false;
+    } finally {
+      setIsLoading(false);
+    }
+  }, [displayName, sessionId, subscribeToRoom, toast]);
+
+  // Upload file to storage
+  const uploadFile = useCallback(async (file: File): Promise<string | null> => {
+    if (!roomId) return null;
+    
+    try {
+      const fileExt = file.name.split('.').pop();
+      const fileName = `${roomId}/${crypto.randomUUID()}.${fileExt}`;
+      
+      const { error: uploadError } = await supabase.storage
+        .from('chat-files')
+        .upload(fileName, file);
+
+      if (uploadError) throw uploadError;
+
+      const { data: { publicUrl } } = supabase.storage
+        .from('chat-files')
+        .getPublicUrl(fileName);
+
+      return publicUrl;
+    } catch (error: any) {
+      toast({
+        title: 'Error uploading file',
+        description: error.message,
+        variant: 'destructive',
+      });
+      return null;
+    }
+  }, [roomId, toast]);
+
+  // Send a message
+  const sendMessage = useCallback(async (content: string, type: 'text' | 'image' | 'file' | 'voice' | 'video' = 'text') => {
+    if (!roomId || !participantId || !content.trim()) return;
+
+    try {
+      const { error } = await supabase.from('messages').insert({
+        room_id: roomId,
+        participant_id: participantId,
+        content: content.trim(),
+        message_type: type,
+      });
+
+      if (error) throw error;
+    } catch (error: any) {
+      toast({
+        title: 'Error sending message',
+        description: error.message,
+        variant: 'destructive',
+      });
+    }
+  }, [roomId, participantId, toast]);
+
+  // Leave room
+  const leaveRoom = useCallback(async () => {
+    if (!participantId) return;
+
+    try {
+      await supabase
+        .from('room_participants')
+        .update({ is_active: false })
+        .eq('id', participantId);
+
+      if (channelRef.current) {
+        channelRef.current.unsubscribe();
+      }
+
+      setRoomId(null);
+      setRoomCode(null);
+      setParticipantId(null);
+      setMessages([]);
+      setParticipants([]);
+      setIsConnected(false);
+    } catch (error: any) {
+      toast({
+        title: 'Error leaving room',
+        description: error.message,
+        variant: 'destructive',
+      });
+    }
+  }, [participantId, toast]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (channelRef.current) {
+        channelRef.current.unsubscribe();
+      }
+    };
+  }, []);
+
+  return {
+    roomId,
+    roomCode,
+    participantId,
+    messages,
+    participants,
+    isConnected,
+    isLoading,
+    createRoom,
+    joinRoom,
+    sendMessage,
+    uploadFile,
+    leaveRoom,
+  };
+}
